@@ -1,0 +1,25 @@
+﻿body {
+}
+
+fieldset {
+    padding: 20px;
+}
+
+fieldset fieldset {
+    border: 1px solid #666;
+    border-radius: 10px;
+}
+
+fieldset fieldset label { 
+    float: left; 
+    width: 200px;
+}
+
+.form-group {
+    display: block;
+    clear: both;
+}
+
+.checkbox label { font-size: smaller; }
+.checkbox label:first-child { width: 400px; }
+.checkbox label:first-child input { margin-left: 200px; margin-right: 10px; }

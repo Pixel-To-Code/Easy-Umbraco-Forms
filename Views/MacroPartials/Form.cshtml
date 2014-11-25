@@ -1,0 +1,467 @@
+﻿@inherits Umbraco.Web.Mvc.UmbracoTemplatePage
+@using System.Xml.XPath
+@using umbraco.cms.businesslogic.datatype
+@using umbraco.editorControls.SettingControls
+@using Umbraco.Core.Services
+@using System.Text
+@using System.Text.RegularExpressions
+@{
+    Layout = null;
+
+    // SETUP    
+    
+    // initialise random numbers for captcha sum
+    Random r = new Random(DateTime.Now.Millisecond);
+    int num1 = r.Next(1, 9), num2 = r.Next(1, 9);
+    int ans = num1 + num2;
+ 
+    // get admin email from the root node
+    IPublishedContent root = CurrentPage.AncestorOrSelf(1);
+    string contactEmail = (string)root.GetPropertyValue("contactEmail");
+    if (string.IsNullOrEmpty(contactEmail)) { contactEmail = "chris.isnt@gmail.com"; }
+    
+    // page properties
+    string title = Umbraco.Field("title", altFieldAlias: "pageName").ToString();
+    string bodyText = Umbraco.Field("bodyText").ToString();
+
+    // form properties
+    // name of the doctype we are using to build and store this form
+    string doctype = String.IsNullOrEmpty(CurrentPage.DocumentType) ? "ExampleForm" : CurrentPage.DocumentType.ToString();
+    // thank you message displayed when form successfully submitted
+    string thankYou = String.IsNullOrEmpty(CurrentPage.ThankYouMessage) ? "Thank you for sending the information below:" : CurrentPage.ThankYouMessage.ToString();
+    // folder in content tree where form submissions will be stored
+    var folderId = CurrentPage.StorageFolder;
+    if (String.IsNullOrEmpty(folderId)) {folderId = root.Id;}
+
+    // Umbraco content API - get the content type of the form
+    IContentService contentService = ApplicationContext.Current.Services.ContentService;
+    IContentTypeService contentTypeService = ApplicationContext.Current.Services.ContentTypeService;
+    IContentType dt = contentTypeService.GetContentType(doctype);
+
+    if (dt == null)
+    {
+        @Html.Raw("Your form cannot be created as no document type has been selected.")
+        return;
+    }
+    
+    IEnumerable<PropertyGroup> tabs = dt.PropertyGroups;
+    IEnumerable<PropertyType> properties = dt.CompositionPropertyTypes.OrderBy(x => x.SortOrder);
+
+    // javascript validation rules text
+    StringBuilder sbRules = new StringBuilder();
+
+    // javascript validation rules text
+    StringBuilder sbFormData = new StringBuilder();
+                    
+    // POSTBACK
+
+    // if we have a document type
+    if (dt != null)
+    {
+        // initialise valid flag
+        bool bValid = ViewData.ModelState.IsValid;
+
+        // after form post, save and display posted values
+        if (IsPost)
+        {
+            // check the anti-forgery token matches
+            try {
+                AntiForgery.Validate(Request.Cookies["__RequestVerificationToken"].Value, Request.Form["__RequestVerificationToken"].ToString());
+            }
+            catch
+            {
+                bValid = false;
+            }
+
+            // server-side validation
+
+            // loop through properties and validate input server side
+            foreach (PropertyGroup pg in tabs)
+            {
+                foreach (PropertyType pt in pg.PropertyTypes.OrderBy(x => x.SortOrder))           
+                {
+                var fieldName = pt.Alias + pt.Id;
+
+                if (pt.Mandatory && string.IsNullOrEmpty(Request.Form[fieldName]))
+                {
+                    <p>@pt.Name : a value is required</p>
+                    bValid = false;
+                }
+                if (!string.IsNullOrEmpty(pt.ValidationRegExp))
+                {
+                    Regex regex = new Regex(pt.ValidationRegExp, RegexOptions.IgnoreCase);
+
+                    if (!regex.IsMatch(Request.Form[fieldName].ToString()))
+                    {
+                        <p>@pt.Name : a correct value is required</p>
+                        bValid = false;
+                    }
+                }
+            }
+            }
+
+            // validate sum
+            num1 = int.Parse(Request.Form["num1"]);
+            num2 = int.Parse(Request.Form["num2"]);
+
+            if (Request["sum"] == null || string.IsNullOrEmpty(Request["sum"].ToString()) || int.Parse(Request["sum"].ToString()) != (num1 + num2))
+            {
+                bValid = false;
+                <p>Sum : invalid answer</p>
+            }
+
+            // if all ok, show thank you message
+
+            if (bValid)
+            {
+                // save the information as a content node with the specified doc type
+                @SaveContentItem(contentService, properties, doctype, folderId, title)
+
+                // show the information entered and compile message for email
+
+                <p>@thankYou</p>
+
+                // open table for email data
+                sbFormData.Append("<table>");
+
+                foreach (PropertyGroup pg in tabs)
+                {
+                    foreach (PropertyType pt in pg.PropertyTypes.OrderBy(x => x.SortOrder))
+                    {
+                        // get the name and value
+                        var fieldName = pt.Alias + pt.Id;
+                        string fieldValue = FieldValue(pt.PropertyEditorAlias, fieldName);
+                    
+                        // override on/off check box values
+                        if (pt.PropertyEditorAlias == "Umbraco.TrueFalse") { fieldValue = (fieldValue == "1" ? "True" : "False"); }
+ 
+                        // save it for the email
+                        sbFormData.Append("<tr><td>" + pt.Alias + "</td><td>" + fieldValue + "</td></tr>");
+
+                        <div class=" form-group" style="clear:both;">
+                            <label for="@fieldName" class="control-label ">@pt.Name :</label>
+                            <div class="">
+                                @fieldValue
+                            </div>
+                        </div>
+                    }
+                }
+                
+                // close table for email data
+                sbFormData.Append("</table>");
+
+                // send an email
+                if(!string.IsNullOrEmpty(contactEmail))
+                {
+                    @SendEmail(contactEmail, doctype, title, sbFormData.ToString())
+                }
+
+                // ALL DONE, get out of here without rebuilding the form
+                return;
+            }
+        }
+    }
+
+
+}
+
+
+
+
+@* BUILD THE FORM *@
+
+@if (dt != null)
+{
+    <form class="form-horizontal" id="@("frm" + DateTime.Now.Millisecond)" method="POST">
+
+        <fieldset>
+
+            @Html.AntiForgeryToken()
+            @Html.Hidden("num1", num1)
+            @Html.Hidden("num2", num2)
+
+            @if (dt != null)
+{
+    // build the form and client-side validation
+
+    bool bNotFirst = false;
+
+    foreach (PropertyGroup pg in tabs)
+    {
+        <fieldset>
+            <legend>@pg.Name</legend>
+            @foreach (PropertyType pt in pg.PropertyTypes.OrderBy(x => x.SortOrder))
+            {
+                var fieldName = pt.Alias + pt.Id;
+
+                // javascript validation
+
+                if (pt.Mandatory || !string.IsNullOrEmpty(pt.ValidationRegExp))
+                {
+                    if (bNotFirst)
+                    {
+                        sbRules.Append(",");
+                    }
+                    bNotFirst = true;
+
+                    sbRules.Append(fieldName + ":{");
+                    if (pt.Mandatory)
+                    {
+                        sbRules.Append("required: true");
+                    }
+                    if (pt.Mandatory && !string.IsNullOrEmpty(pt.ValidationRegExp))
+                    {
+                        sbRules.Append(", ");
+                    }
+                    if (!string.IsNullOrEmpty(pt.ValidationRegExp))
+                    {
+                        sbRules.Append(Html.Raw("regex: \"" + pt.ValidationRegExp + "\""));
+                    }
+                    sbRules.Append("}");
+
+                }
+
+
+                // form fields
+
+                <div class="form-group">
+                    @if (pt.PropertyEditorAlias == "Umbraco.TrueFalse")
+                    {
+                        <div class=" ">
+                            @CheckBox(pt.Name, fieldName)
+                        </div>
+                    }
+                    else
+                    {
+                        // label
+                        <label for="@fieldName" class="control-label ">@pt.Name :</label>
+
+                        <div class="">
+
+                            @if (pt.PropertyEditorAlias == "Umbraco.DropDown" || pt.PropertyEditorAlias == "Umbraco.DropDownMultiple")
+                            {
+                                @DropDownList(pt.DataTypeDefinitionId, fieldName, pt.PropertyEditorAlias)
+                            }
+                            else if (pt.PropertyEditorAlias == "Umbraco.RadioButtonList")
+                            {
+                                @RadioButtonList(pt.DataTypeDefinitionId, fieldName)
+                            }
+                            else if (pt.PropertyEditorAlias == "Umbraco.CheckBoxList")
+                            {
+                                @CheckBoxList(pt.DataTypeDefinitionId, fieldName)
+                            }
+                            else if (pt.PropertyEditorAlias == "Umbraco.TextboxMultiple" || pt.PropertyEditorAlias == "Umbraco.TinyMCEv3")
+                            {
+                                @TextArea(pt.Name, fieldName)
+                            }
+                            else if (pt.PropertyEditorAlias == "Umbraco.Integer")
+                            {
+                                @TextBox(pt.Name, fieldName, "number")
+                            }
+                            else if (pt.PropertyEditorAlias == "Umbraco.Date")
+                            {
+                                @TextBox(pt.Name, fieldName, "date")
+                            }
+                            else if (pt.PropertyEditorAlias == "Umbraco.DateTime")
+                            {
+                                @TextBox(pt.Name, fieldName, "datetime-local")
+                            }
+                            else
+                            {
+                                @TextBox(pt.Name, fieldName, "text")
+                            }
+                            @* show help text if exists *@
+                            @if (!string.IsNullOrEmpty(pt.Description))
+                            {
+                                <span class="help-block">@pt.Description</span>
+                            }
+                        </div>
+
+                    }
+                </div>
+            }
+        </fieldset>
+    }
+    // add javascript validation for captcha sum
+    sbRules.Append(",sum:{required: true, regex:\"^" + ans + "$\"}");
+
+}
+
+            <div class=" form-group">
+                <label for="sum" class="control-label ">Sum :</label>
+                <div class="">
+                    <span class="help-block">@Html.Encode("To help us avoid spam, please add " + num1 + " and " + num2 + " and enter the answer in the box")</span>
+                    <input type="text" class="form-control" id="sum" name="sum" maxlength="2" placeholder="@(num1 + " plus " + num2 + " equals")" value="@Request.Form["sum"]" />
+                </div>
+            </div>
+
+            <div class=" form-group">
+                <div class=" ">
+                    <span id="errormessage" class="errorMessage">
+                    </span>
+                </div>
+            </div>
+
+            <div class=" form-group">
+                <div class=" ">
+                    <button type="submit" class="btn btn-primary">Submit</button>
+                </div>
+            </div>
+
+        </fieldset>
+    </form>
+
+    @* set the value of the 'rules' variable, used by the javascript client-side validation *@
+    <script>
+        rules = {@Html.Raw(sbRules.ToString()) }
+    </script>
+
+}
+
+@* HELPER FUNCTIONS *@
+
+@helper TextBox(string propName, string fieldName, string fieldType)
+{
+    <input type="@fieldType" class="form-control" id="@fieldName" name="@fieldName" placeholder="@propName" value="@Request.Form[fieldName]" />
+}
+
+@helper TextArea(string propName, string fieldName)
+{
+    <textarea rows="4" class="form-control" id="@fieldName" name="@fieldName" placeholder="@propName">@Request.Form[fieldName]</textarea>
+}
+
+@helper CheckBox(string propName, string fieldName)
+{
+    <div class="checkbox">
+        <label><input type="checkbox" name="@fieldName" value="1">@propName</label>
+    </div>
+}
+
+@helper CheckBoxList(int dataTypeId, string fieldName)
+{
+    XPathNodeIterator preValues = PreValues(dataTypeId);
+    while (preValues.MoveNext())
+    {
+        string preValueId = preValues.Current.GetAttribute("id", "");
+        string preValue = preValues.Current.Value;
+        <div class="checkbox">
+            <input type="checkbox" id="@(fieldName + preValue)" name="@fieldName" value="@preValueId" />
+            <label for="@(fieldName + preValue)">@preValue</label>
+        </div>
+    }
+}
+
+@helper RadioButtonList(int dataTypeId, string fieldName)
+{
+    XPathNodeIterator preValues = PreValues(dataTypeId);
+    while (preValues.MoveNext())
+    {
+        string preValueId = preValues.Current.GetAttribute("id", "");
+        string preValue = preValues.Current.Value;
+        <div class="radiobutton">
+            <input type="radio" id="@(fieldName + preValue)" name="@fieldName" value="@preValueId" />
+            <label for="@(fieldName + preValue)">@preValue</label>
+        </div>
+    }
+}
+
+@helper DropDownList(int dataTypeId, string fieldName, string propType)
+{
+    <select id="@fieldName" name="@fieldName" @(propType == "Umbraco.DropDownMultiple" ? "multiple=true" : "")>
+        @{
+            XPathNodeIterator preValues = PreValues(dataTypeId);
+            while (preValues.MoveNext())
+            {
+                string preValueId = preValues.Current.GetAttribute("id", "");
+                string preValue = preValues.Current.Value;
+                <option value="@preValueId">@preValue</option>
+            }
+        }
+    </select>
+}
+
+
+
+@helper SaveContentItem(IContentService contentService, IEnumerable<PropertyType> properties, string doctype, int folderId, string title)
+{
+    var ct = contentService.CreateContent(doctype + " : " + title + " : " + DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss"), folderId, doctype, 0);
+
+    foreach (PropertyType pt in properties)
+    {
+        var fieldName = pt.Alias + pt.Id;
+        var fieldValue = Request.Form[fieldName];
+        //// override on/off check box values
+        //if (pt.PropertyEditorAlias == "Umbraco.TrueFalse") { fieldValue = (fieldValue == "on" ? "1" : "0"); }
+        ct.SetValue(pt.Alias, fieldValue);
+    }
+
+    contentService.Save(ct);
+}
+
+@helper SendEmail(string contactEmail, string doctype, string title, string formData)
+{
+    string to = contactEmail;
+    string subj = "Form submission : " + doctype + " : " + title;
+
+    try
+    {
+        string smtpServer = System.Configuration.ConfigurationManager.AppSettings["smtpServer"];
+        string smtpPort = System.Configuration.ConfigurationManager.AppSettings["smtpPort"];
+        string userName = System.Configuration.ConfigurationManager.AppSettings["smtpUserName"];
+        string password = System.Configuration.ConfigurationManager.AppSettings["smtpPassword"];
+        string adminEmail = System.Configuration.ConfigurationManager.AppSettings["adminEmail"];
+
+        // Initialize WebMail helper
+        WebMail.SmtpServer = smtpServer;
+        WebMail.SmtpPort = Convert.ToInt32(smtpPort);
+        WebMail.UserName = userName;
+        WebMail.Password = password;
+        WebMail.From = contactEmail;
+
+        // Send email
+        WebMail.Send(to: to,
+            cc: adminEmail,
+            subject: subj,
+            body: formData
+        );
+    }
+    catch (Exception ex)
+    {
+        // display failure message
+        formData = ex.Message;
+    }
+
+}
+
+@functions {
+    public XPathNodeIterator PreValues(int dataTypeId)
+    {
+        XPathNodeIterator iterator = umbraco.library.GetPreValues(dataTypeId);
+        iterator.MoveNext(); //move to first
+        return iterator.Current.SelectChildren("preValue", "");
+    }
+
+    public string FieldValue(string propertyEditorAlias, string fieldName)
+    {
+        string fieldValue = Request.Form[fieldName];
+
+        // get the values fro prevalue based fields
+        if (propertyEditorAlias == "Umbraco.RadioButtonList"
+                || propertyEditorAlias == "Umbraco.DropDown"
+                || propertyEditorAlias == "Umbraco.DropDownMultiple"
+                || propertyEditorAlias == "Umbraco.CheckBoxList"
+            )
+        {
+            fieldValue = "";
+            string preValues = Request.Form[fieldName];
+            string[] preValueIds = preValues.Split(',');
+            foreach (string preValueId in preValueIds)
+            {
+                if (!string.IsNullOrEmpty(fieldValue)) { fieldValue += ", "; }
+                fieldValue += umbraco.library.GetPreValueAsString(Convert.ToInt32(preValueId.Trim()));
+            }
+        }
+
+        return fieldValue;
+    }
+}
